@@ -62,6 +62,9 @@ class Response(object):
             return [mte.render(**argv)]
         else:
             if isinstance(message, six.string_types):
+                # Note(JP): A WSGI app should always respond
+                # with bytes, so at this point the message should
+                # become encoded instead of passing a text object.
                 return [message]
             elif isinstance(message, six.binary_type):
                 return [message]
@@ -154,7 +157,7 @@ class BadGateway(Response):
     _status = "502 Bad Gateway"
 
 
-class HttpParameters():
+class HttpParameters(object):
     """GET or POST signature parameters for Redirect or POST-SimpleSign bindings
     because they are not contained in XML unlike the POST binding
     """

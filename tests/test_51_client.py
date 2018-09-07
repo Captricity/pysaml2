@@ -22,10 +22,11 @@ from saml2 import samlp
 from saml2 import sigver
 from saml2 import s_utils
 from saml2.assertion import Assertion
+from saml2.extension.requested_attributes import RequestedAttributes
+from saml2.extension.requested_attributes import RequestedAttribute
 
 from saml2.authn_context import INTERNETPROTOCOLPASSWORD
 from saml2.client import Saml2Client
-from saml2.config import SPConfig
 from saml2.pack import parse_soap_enveloped_saml
 from saml2.response import LogoutResponse
 from saml2.saml import NAMEID_FORMAT_PERSISTENT, EncryptedAssertion, Advice
@@ -33,7 +34,7 @@ from saml2.saml import NAMEID_FORMAT_TRANSIENT
 from saml2.saml import NameID
 from saml2.samlp import SessionIndex
 from saml2.server import Server
-from saml2.sigver import pre_encryption_part, make_temp, pre_encrypt_assertion
+from saml2.sigver import pre_encryption_part, pre_encrypt_assertion
 from saml2.sigver import rm_xmltag
 from saml2.sigver import verify_redirect_signature
 from saml2.s_utils import do_attribute_statement
@@ -50,6 +51,8 @@ AUTHN = {
     "class_ref": INTERNETPROTOCOLPASSWORD,
     "authn_auth": "http://www.example.com/login"
 }
+
+encode_fn = getattr(base64, 'encodebytes', base64.encodestring)
 
 
 def generate_cert():
@@ -118,18 +121,6 @@ def _leq(l1, l2):
     return set(l1) == set(l2)
 
 
-# def test_parse_3():
-#     xml_response = open(XML_RESPONSE_FILE3).read()
-#     response = samlp.response_from_string(xml_response)
-#     client = Saml2Client({})
-#     (ava, name_id, real_uri) = \
-#             client.do_response(response, "xenosmilus.umdc.umu.se")
-#     print(40*"=")
-#     print(ava)
-#     print(40*",")
-#     print(name_id)
-#     assert False
-
 REQ1 = {"1.2.14": """<?xml version='1.0' encoding='UTF-8'?>
 <ns0:AttributeQuery Destination="https://idp.example.com/idp/" ID="id1"
 IssueInstant="%s" Version="2.0" xmlns:ns0="urn:oasis:names:tc:SAML:2
@@ -175,7 +166,7 @@ class TestClient:
             "E8042FB4-4D5B-48C3-8E14-8EDD852790DD",
             format=saml.NAMEID_FORMAT_PERSISTENT,
             message_id="id1")
-        reqstr = "%s" % req.to_string().decode('utf-8')
+        reqstr = "%s" % req.to_string().decode()
 
         assert req.destination == "https://idp.example.com/idp/"
         assert req.id == "id1"
@@ -189,7 +180,6 @@ class TestClient:
 
         attrq = samlp.attribute_query_from_string(reqstr)
 
-        print(attrq.keyswv())
         assert _leq(attrq.keyswv(), ['destination', 'subject', 'issue_instant',
                                      'version', 'id', 'issuer'])
 
@@ -218,7 +208,6 @@ class TestClient:
             format=saml.NAMEID_FORMAT_PERSISTENT,
             message_id="id1")
 
-        print(req.to_string())
         assert req.destination == "https://idp.example.com/idp/"
         assert req.id == "id1"
         assert req.version == "2.0"
@@ -268,7 +257,6 @@ class TestClient:
             "http://www.example.com/sso", message_id="id1")[1]
 
         ar = samlp.authn_request_from_string(ar_str)
-        print(ar)
         assert ar.assertion_consumer_service_url == ("http://lingon.catalogix"
                                                      ".se:8087/")
         assert ar.destination == "http://www.example.com/sso"
@@ -279,6 +267,20 @@ class TestClient:
         nid_policy = ar.name_id_policy
         assert nid_policy.allow_create == "false"
         assert nid_policy.format == saml.NAMEID_FORMAT_TRANSIENT
+
+        node_requested_attributes = None
+        for e in ar.extensions.extension_elements:
+            if e.tag == RequestedAttributes.c_tag:
+                node_requested_attributes = e
+                break
+        assert node_requested_attributes is not None
+
+        for c in node_requested_attributes.children:
+            assert c.tag == RequestedAttribute.c_tag
+            assert c.attributes['isRequired'] in ['true', 'false']
+            assert c.attributes['Name']
+            assert c.attributes['FriendlyName']
+            assert c.attributes['NameFormat']
 
     def test_create_auth_request_unset_force_authn(self):
         req_id, req = self.client.create_authn_request(
@@ -299,7 +301,6 @@ class TestClient:
             "http://www.example.com/sso", message_id="id1")[1]
 
         ar = samlp.authn_request_from_string(ar_str)
-        print(ar)
         assert ar.assertion_consumer_service_url == ("http://lingon.catalogix"
                                                      ".se:8087/")
         assert ar.destination == "http://www.example.com/sso"
@@ -322,7 +323,6 @@ class TestClient:
             message_id="666")[1]
 
         ar = samlp.authn_request_from_string(ar_str)
-        print(ar)
         assert ar.id == "666"
         assert ar.assertion_consumer_service_url == "http://lingon.catalogix" \
                                                     ".se:8087/"
@@ -337,8 +337,6 @@ class TestClient:
         assert nid_policy.sp_name_qualifier == "urn:mace:example.com:it:tek"
 
     def test_sign_auth_request_0(self):
-        # print(self.client.config)
-
         req_id, areq = self.client.create_authn_request(
             "http://www.example.com/sso", sign=True, message_id="id1")
 
@@ -349,11 +347,9 @@ class TestClient:
         assert ar.signature
         assert ar.signature.signature_value
         signed_info = ar.signature.signed_info
-        # print(signed_info)
         assert len(signed_info.reference) == 1
         assert signed_info.reference[0].uri == "#id1"
         assert signed_info.reference[0].digest_value
-        print("------------------------------------------------")
         try:
             assert self.client.sec.correctly_signed_authn_request(
                 ar_str, self.client.config.xmlsec_binary,
@@ -389,12 +385,13 @@ class TestClient:
             destination="http://lingon.catalogix.se:8087/",
             sp_entity_id="urn:mace:example.com:saml:roland:sp",
             name_id_policy=nameid_policy,
+            sign_response=True,
             userid="foba0001@example.com",
             authn=AUTHN)
 
         resp_str = "%s" % resp
 
-        resp_str = base64.encodestring(resp_str.encode('utf-8'))
+        resp_str = encode_fn(resp_str.encode())
 
         authn_response = self.client.parse_authn_request_response(
             resp_str, BINDING_HTTP_POST,
@@ -405,7 +402,6 @@ class TestClient:
         assert authn_response.response.assertion[0].issuer.text == IDP
         session_info = authn_response.session_info()
 
-        print(session_info)
         assert session_info["ava"] == {'mail': ['derek@nyy.mlb.com'],
                                        'givenName': ['Derek'],
                                        'sn': ['Jeter'],
@@ -419,7 +415,6 @@ class TestClient:
         # One person in the cache
         assert len(self.client.users.subjects()) == 1
         subject_id = self.client.users.subjects()[0]
-        print("||||", self.client.users.get_info_from(subject_id, IDP))
         # The information I have about the subject comes from one source
         assert self.client.users.issuers_of_info(subject_id) == [IDP]
 
@@ -433,11 +428,12 @@ class TestClient:
             in_response_to="id2",
             destination="http://lingon.catalogix.se:8087/",
             sp_entity_id="urn:mace:example.com:saml:roland:sp",
+            sign_response=True,
             name_id_policy=nameid_policy,
             userid="also0001@example.com",
             authn=AUTHN)
 
-        resp_str = base64.encodestring(resp_str.encode('utf-8'))
+        resp_str = encode_fn(resp_str.encode())
 
         self.client.parse_authn_request_response(
             resp_str, BINDING_HTTP_POST,
@@ -448,7 +444,6 @@ class TestClient:
         issuers = [self.client.users.issuers_of_info(s) for s in
                    self.client.users.subjects()]
         # The information I have about the subjects comes from the same source
-        print(issuers)
         assert issuers == [[IDP], [IDP]]
 
     def test_response_2(self):
@@ -487,7 +482,7 @@ class TestClient:
 
         resp_str = "%s" % resp
 
-        resp_str = base64.encodestring(resp_str.encode('utf-8'))
+        resp_str = encode_fn(resp_str.encode())
 
         authn_response = _client.parse_authn_request_response(
             resp_str, BINDING_HTTP_POST,
@@ -522,7 +517,7 @@ class TestClient:
 
         resp_str = "%s" % resp
 
-        resp_str = base64.encodestring(resp_str.encode('utf-8'))
+        resp_str = encode_fn(resp_str.encode())
 
         authn_response = _client.parse_authn_request_response(
             resp_str, BINDING_HTTP_POST,
@@ -557,7 +552,7 @@ class TestClient:
 
         resp_str = "%s" % resp
 
-        resp_str = base64.encodestring(resp_str.encode('utf-8'))
+        resp_str = encode_fn(resp_str.encode())
 
         authn_response = _client.parse_authn_request_response(
             resp_str, BINDING_HTTP_POST,
@@ -601,7 +596,7 @@ class TestClient:
 
         resp_str = "%s" % resp
 
-        resp_str = base64.encodestring(resp_str.encode('utf-8'))
+        resp_str = encode_fn(resp_str.encode())
 
         authn_response = _client.parse_authn_request_response(
             resp_str, BINDING_HTTP_POST,
@@ -654,7 +649,7 @@ class TestClient:
 
         resp_str = "%s" % resp
 
-        resp_str = base64.encodestring(resp_str.encode('utf-8'))
+        resp_str = encode_fn(resp_str.encode())
 
         authn_response = _client.parse_authn_request_response(
             resp_str, BINDING_HTTP_POST,
@@ -690,7 +685,7 @@ class TestClient:
 
         resp_str = "%s" % resp
 
-        resp_str = base64.encodestring(resp_str.encode('utf-8'))
+        resp_str = encode_fn(resp_str.encode())
 
         authn_response = _client.parse_authn_request_response(
             resp_str, BINDING_HTTP_POST,
@@ -733,13 +728,70 @@ class TestClient:
 
         resp_str = "%s" % resp
 
-        resp_str = base64.encodestring(resp_str.encode('utf-8'))
+        resp_str = encode_fn(resp_str.encode())
 
         authn_response = _client.parse_authn_request_response(
             resp_str, BINDING_HTTP_POST,
             {"id1": "http://foo.example.com/service"}, {"id1": cert})
 
         self.verify_authn_response(idp, authn_response, _client, ava_verify)
+
+    def test_response_no_name_id(self):
+        """ Test that the SP client can parse an authentication response
+        from an IdP that does not contain a <NameID> element."""
+
+        conf = config.SPConfig()
+        conf.load_file("server_conf")
+        client = Saml2Client(conf)
+
+        # Use the same approach as the other tests for mocking up
+        # an authentication response to parse.
+        idp, ava, ava_verify, nameid_policy = (
+                self.setup_verify_authn_response()
+                )
+
+        # Mock up an authentication response but do not encrypt it
+        # nor sign it since below we will modify it directly. Note that
+        # setting name_id to None still results in a response that includes
+        # a <NameID> element.
+        resp = self.server.create_authn_response(
+            identity=ava,
+            in_response_to="id1",
+            destination="http://lingon.catalogix.se:8087/",
+            sp_entity_id="urn:mace:example.com:saml:roland:sp",
+            name_id=None,
+            userid="foba0001@example.com",
+            authn=AUTHN,
+            sign_response=False,
+            sign_assertion=False,
+            encrypt_assertion=False,
+            encrypt_assertion_self_contained=False
+        )
+
+        # The create_authn_response method above will return an instance
+        # of saml2.samlp.Response when neither encrypting nor signing and
+        # so we can remove the <NameID> element directly.
+        resp.assertion.subject.name_id = None
+
+        # Assert that the response does not contain a NameID element so that
+        # the parsing below is a fair test.
+        assert str(resp).find("NameID") == -1
+
+        # Cast the response to a string and encode it to mock up the payload
+        # the SP client is expected to receive via HTTP POST binding.
+        resp_str = encode_fn(str(resp).encode())
+
+        # We do not need the client to verify a signature for this test.
+        client.want_assertions_signed = False
+        client.want_response_signed = False
+
+        # Parse the authentication response that does not include a <NameID>.
+        authn_response = client.parse_authn_request_response(
+            resp_str, BINDING_HTTP_POST,
+            {"id1": "http://foo.example.com/service"})
+
+        # A successful test is parsing the response.
+        assert authn_response is not None
 
     def setup_verify_authn_response(self):
         idp = "urn:mace:example.com:saml:roland:idp"
@@ -771,14 +823,10 @@ class TestClient:
 
     def test_init_values(self):
         entityid = self.client.config.entityid
-        print(entityid)
         assert entityid == "urn:mace:example.com:saml:roland:sp"
-        print(self.client.metadata.with_descriptor("idpsso"))
         location = self.client._sso_location()
-        print(location)
         assert location == 'http://localhost:8088/sso'
         my_name = self.client._my_name()
-        print(my_name)
         assert my_name == "urn:mace:example.com:saml:roland:sp"
 
     def test_sign_then_encrypt_assertion(self):
@@ -845,7 +893,6 @@ class TestClient:
 
             seresp.assertion = resp_ass
             seresp.encrypted_assertion = None
-            # print(_sresp)
 
         assert seresp.assertion
 
@@ -889,7 +936,6 @@ class TestClient:
                                      node_id=assertion.id)
 
         sigass = rm_xmltag(sigass)
-
         response = sigver.response_factory(
             in_response_to="_012345",
             destination="http://lingon.catalogix.se:8087/",
@@ -910,8 +956,10 @@ class TestClient:
 
         # seresp = samlp.response_from_string(enctext)
 
-        resp_str = base64.encodestring(enctext.encode('utf-8'))
+        resp_str = encode_fn(enctext.encode())
         # Now over to the client side
+        # Explicitely allow unsigned responses for this and the following 2 tests
+        self.client.want_response_signed = False
         resp = self.client.parse_authn_request_response(
             resp_str, BINDING_HTTP_POST,
             {"_012345": "http://foo.example.com/service"})
@@ -1011,7 +1059,7 @@ class TestClient:
 
         # seresp = samlp.response_from_string(enctext)
 
-        resp_str = base64.encodestring(enctext.encode('utf-8'))
+        resp_str = encode_fn(enctext.encode())
         # Now over to the client side
         resp = self.client.parse_authn_request_response(
             resp_str, BINDING_HTTP_POST,
@@ -1296,7 +1344,7 @@ class TestClient:
 
         # seresp = samlp.response_from_string(enctext)
 
-        resp_str = base64.encodestring(str(response).encode('utf-8'))
+        resp_str = encode_fn(str(response).encode())
         # Now over to the client side
         resp = self.client.parse_authn_request_response(
             resp_str, BINDING_HTTP_POST,
@@ -1312,6 +1360,9 @@ class TestClient:
                     ['test.testsson@test.se'], 'sn': ['Jeter']}
 
     def test_signed_redirect(self):
+
+        # Revert configuration change to disallow unsinged responses
+        self.client.want_response_signed = True
 
         msg_str = "%s" % self.client.create_authn_request(
             "http://localhost:8088/sso", message_id="id1")[1]
@@ -1330,7 +1381,6 @@ class TestClient:
 
         res = self.server.parse_authn_request(qs["SAMLRequest"][0],
                                               BINDING_HTTP_REDIRECT)
-        print(res)
 
     def test_do_logout_signed_redirect(self):
         conf = config.SPConfig()
@@ -1371,7 +1421,6 @@ class TestClient:
 
         res = self.server.parse_logout_request(qs["SAMLRequest"][0],
                                                BINDING_HTTP_REDIRECT)
-        print(res)
 
     def test_do_logout_post(self):
         # information about the user from an IdP
@@ -1442,7 +1491,7 @@ class TestClientWithDummy():
     def setup_class(self):
         self.server = FakeIDP("idp_all_conf")
 
-        conf = SPConfig()
+        conf = config.SPConfig()
         conf.load_file("servera_conf")
         self.client = Saml2Client(conf)
 
@@ -1512,12 +1561,13 @@ class TestClientWithDummy():
         entity_ids = self.client.users.issuers_of_info(nid)
         assert entity_ids == ["urn:mace:example.com:saml:roland:idp"]
         resp = self.client.global_logout(nid, "Tired", in_a_while(minutes=5))
-        print(resp)
         assert resp
         assert len(resp) == 1
         assert list(resp.keys()) == entity_ids
         response = resp[entity_ids[0]]
         assert isinstance(response, LogoutResponse)
+        assert response.return_addrs
+        assert len(response.return_addrs) == 1
 
     def test_post_sso(self):
         binding = BINDING_HTTP_POST
@@ -1542,8 +1592,9 @@ class TestClientWithDummy():
                                  'application/x-www-form-urlencoded')]
 
         response = self.client.send(**http_args)
-        print(response.text)
         _dic = unpack_form(response.text, "SAMLResponse")
+        # Explicitly allow unsigned responses for this test
+        self.client.want_response_signed = False
         resp = self.client.parse_authn_request_response(_dic["SAMLResponse"],
                                                         BINDING_HTTP_POST,
                                                         {sid: "/"})
@@ -1577,7 +1628,6 @@ class TestClientWithDummy():
                                  'application/x-www-form-urlencoded')]
 
         response = self.client.send(**http_args)
-        print(response.text)
         _dic = unpack_form(response.text, "SAMLResponse")
         resp = self.client.parse_authn_request_response(_dic["SAMLResponse"],
                                                         BINDING_HTTP_POST,
@@ -1586,6 +1636,44 @@ class TestClientWithDummy():
         assert ac.authenticating_authority[0].text == \
                'http://www.example.com/login'
         assert ac.authn_context_class_ref.text == INTERNETPROTOCOLPASSWORD
+
+
+class TestClientNoConfigContext():
+    def setup_class(self):
+        self.server = FakeIDP("idp_all_conf")
+
+        conf = config.Config()  # not SPConfig
+        conf.load_file("servera_conf")
+        self.client = Saml2Client(conf)
+
+        self.client.send = self.server.receive
+
+    def test_logout_1(self):
+        """ one IdP/AA logout from"""
+
+        # information about the user from an IdP
+        session_info = {
+            "name_id": nid,
+            "issuer": "urn:mace:example.com:saml:roland:idp",
+            "not_on_or_after": in_a_while(minutes=15),
+            "ava": {
+                "givenName": "Anders",
+                "sn": "Andersson",
+                "mail": "anders.andersson@example.com"
+            }
+        }
+        self.client.users.add_information_about_person(session_info)
+        entity_ids = self.client.users.issuers_of_info(nid)
+        assert entity_ids == ["urn:mace:example.com:saml:roland:idp"]
+        resp = self.client.global_logout(nid, "Tired", in_a_while(minutes=5))
+        assert resp
+        assert len(resp) == 1
+        assert list(resp.keys()) == entity_ids
+        response = resp[entity_ids[0]]
+        assert isinstance(response, LogoutResponse)
+        assert response.return_addrs
+        assert len(response.return_addrs) == 1
+
 
 def test_parse_soap_enveloped_saml_xxe():
     xml = """<?xml version="1.0"?>
@@ -1599,10 +1687,6 @@ def test_parse_soap_enveloped_saml_xxe():
     with raises(EntitiesForbidden):
         parse_soap_enveloped_saml(xml, None)
 
-# if __name__ == "__main__":
-#     tc = TestClient()
-#     tc.setup_class()
-#     tc.test_response()
 
 if __name__ == "__main__":
     tc = TestClient()

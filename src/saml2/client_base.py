@@ -10,6 +10,8 @@ import six
 
 from saml2.entity import Entity
 
+import saml2.attributemaps as attributemaps
+
 from saml2.mdstore import destinations
 from saml2.profile import paos, ecp
 from saml2.saml import NAMEID_FORMAT_TRANSIENT
@@ -18,6 +20,9 @@ from saml2.samlp import NameIDMappingRequest
 from saml2.samlp import AttributeQuery
 from saml2.samlp import AuthzDecisionQuery
 from saml2.samlp import AuthnRequest
+from saml2.samlp import Extensions
+from saml2.extension import sp_type
+from saml2.extension import requested_attributes
 
 import saml2
 import time
@@ -108,17 +113,30 @@ class Base(Entity):
         else:
             self.state = state_cache
 
-        self.logout_requests_signed = False
-        self.allow_unsolicited = False
-        self.authn_requests_signed = False
-        self.want_assertions_signed = False
-        self.want_response_signed = False
-        for foo in ["allow_unsolicited", "authn_requests_signed",
-                    "logout_requests_signed", "want_assertions_signed",
-                    "want_response_signed"]:
-            v = self.config.getattr(foo, "sp")
-            if v is True or v == 'true':
-                setattr(self, foo, True)
+        attribute_defaults = {
+            "logout_requests_signed": False,
+            "allow_unsolicited": False,
+            "authn_requests_signed": False,
+            "want_assertions_signed": False,
+            "want_response_signed": True,
+        }
+
+        for attr, val_default in attribute_defaults.items():
+            val_config = self.config.getattr(attr, "sp")
+            if val_config is None:
+                val = val_default
+            else:
+                val = val_config
+
+            if val == 'true':
+                val = True
+
+            setattr(self, attr, val)
+
+        if self.entity_type == "sp" and not any([self.want_assertions_signed,
+                                                self.want_response_signed]):
+            logger.warning("The SAML service provider accepts unsigned SAML Responses " +
+                           "and Assertions. This configuration is insecure.")
 
         self.artifact2response = {}
 
@@ -346,6 +364,67 @@ class Base(Entity):
         finally:
             if force_authn:
                 args['force_authn'] = 'true'
+
+        conf_sp_type = self.config.getattr('sp_type', 'sp')
+        conf_sp_type_in_md = self.config.getattr('sp_type_in_metadata', 'sp')
+        if conf_sp_type and conf_sp_type_in_md is False:
+            if not extensions:
+                extensions = Extensions()
+            item = sp_type.SPType(text=conf_sp_type)
+            extensions.add_extension_element(item)
+
+        requested_attrs = self.config.getattr('requested_attributes', 'sp')
+        if requested_attrs:
+            if not extensions:
+                extensions = Extensions()
+
+            attributemapsmods = []
+            for modname in attributemaps.__all__:
+                attributemapsmods.append(getattr(attributemaps, modname))
+
+            items = []
+            for attr in requested_attrs:
+                friendly_name = attr.get('friendly_name')
+                name = attr.get('name')
+                name_format = attr.get('name_format')
+                is_required = str(attr.get('required', False)).lower()
+
+                if not name and not friendly_name:
+                    raise ValueError(
+                        "Missing required attribute: '{}' or '{}'".format(
+                            'name', 'friendly_name'))
+
+                if not name:
+                    for mod in attributemapsmods:
+                        try:
+                            name = mod.MAP['to'][friendly_name]
+                        except KeyError:
+                            continue
+                        else:
+                            if not name_format:
+                                name_format = mod.MAP['identifier']
+                            break
+
+                if not friendly_name:
+                    for mod in attributemapsmods:
+                        try:
+                            friendly_name = mod.MAP['fro'][name]
+                        except KeyError:
+                            continue
+                        else:
+                            if not name_format:
+                                name_format = mod.MAP['identifier']
+                            break
+
+                items.append(requested_attributes.RequestedAttribute(
+                    is_required=is_required,
+                    name_format=name_format,
+                    friendly_name=friendly_name,
+                    name=name))
+
+            item = requested_attributes.RequestedAttributes(
+                extension_elements=items)
+            extensions.add_extension_element(item)
 
         if kwargs:
             _args, extensions = self._filter_args(AuthnRequest(), extensions,
@@ -597,50 +676,49 @@ class Base(Entity):
         :return: An response.AuthnResponse or None
         """
 
-        try:
-            _ = self.config.entityid
-        except KeyError:
+        if not getattr(self.config, 'entityid', None):
             raise SAMLError("Missing entity_id specification")
 
-        resp = None
-        if xmlstr:
-            kwargs = {
-                "outstanding_queries": outstanding,
-                "outstanding_certs": outstanding_certs,
-                "allow_unsolicited": self.allow_unsolicited,
-                "want_assertions_signed": self.want_assertions_signed,
-                "want_response_signed": self.want_response_signed,
-                "return_addrs": self.service_urls(binding=binding),
-                "entity_id": self.config.entityid,
-                "attribute_converters": self.config.attribute_converters,
-                "allow_unknown_attributes":
-                    self.config.allow_unknown_attributes,
-                'conv_info': conv_info
-            }
-            try:
-                resp = self._parse_response(xmlstr, AuthnResponse,
-                                            "assertion_consumer_service",
-                                            binding, **kwargs)
-            except StatusError as err:
-                logger.error("SAML status error: %s", err)
-                raise
-            except UnravelError:
-                return None
-            except Exception as err:
-                logger.error("XML parse error: %s", err)
-                raise
+        if not xmlstr:
+            return None
 
-            if resp is None:
-                return None
-            elif isinstance(resp, AuthnResponse):
-                if resp.assertion is not None and len(
-                        resp.response.encrypted_assertion) == 0:
-                    self.users.add_information_about_person(resp.session_info())
-                    logger.info("--- ADDED person info ----")
-                pass
-            else:
-                logger.error("Response type not supported: %s",
-                             saml2.class_name(resp))
+        kwargs = {
+            "outstanding_queries": outstanding,
+            "outstanding_certs": outstanding_certs,
+            "allow_unsolicited": self.allow_unsolicited,
+            "want_assertions_signed": self.want_assertions_signed,
+            "want_response_signed": self.want_response_signed,
+            "return_addrs": self.service_urls(binding=binding),
+            "entity_id": self.config.entityid,
+            "attribute_converters": self.config.attribute_converters,
+            "allow_unknown_attributes":
+                self.config.allow_unknown_attributes,
+            'conv_info': conv_info
+        }
+
+        try:
+            resp = self._parse_response(xmlstr, AuthnResponse,
+                                        "assertion_consumer_service",
+                                        binding, **kwargs)
+        except StatusError as err:
+            logger.error("SAML status error: %s", err)
+            raise
+        except UnravelError:
+            return None
+        except Exception as err:
+            logger.error("XML parse error: %s", err)
+            raise
+
+        if not isinstance(resp, AuthnResponse):
+            logger.error("Response type not supported: %s",
+                         saml2.class_name(resp))
+            return None
+
+        if (resp.assertion and len(resp.response.encrypted_assertion) == 0 and
+                resp.assertion.subject.name_id):
+            self.users.add_information_about_person(resp.session_info())
+            logger.info("--- ADDED person info ----")
+
         return resp
 
     # ------------------------------------------------------------------------

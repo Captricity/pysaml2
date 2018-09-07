@@ -262,7 +262,7 @@ class Saml2Client(Base):
                                           "entity_ids": entity_ids,
                                           "name_id": code(name_id),
                                           "reason": reason,
-                                          "not_on_of_after": expire,
+                                          "not_on_or_after": expire,
                                           "sign": sign}
 
                     responses[entity_id] = (binding, http_info)
@@ -466,7 +466,7 @@ class Saml2Client(Base):
                                   attribute=attribute,
                                   sp_name_qualifier=sp_name_qualifier,
                                   name_qualifier=name_qualifier,
-                                  nameid_format=nameid_format,
+                                  format=nameid_format,
                                   response_args=response_args)
         elif binding == BINDING_HTTP_POST:
             mid = sid()
@@ -484,7 +484,7 @@ class Saml2Client(Base):
             raise SAMLError("Unsupported binding")
 
     def handle_logout_request(self, request, name_id, binding, sign=False,
-                              relay_state=""):
+                              sign_alg=None, relay_state=""):
         """
         Deal with a LogoutRequest
 
@@ -531,7 +531,7 @@ class Saml2Client(Base):
                 "single_logout_service"]
 
         response = self.create_logout_response(_req.message, response_bindings,
-                                               status, sign)
+                                               status, sign, sign_alg=sign_alg)
         rinfo = self.response_args(_req.message, response_bindings)
 
         return self.apply_binding(rinfo["binding"], response,

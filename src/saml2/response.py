@@ -650,7 +650,7 @@ class AuthnResponse(StatusResponse):
                         self.allow_unknown_attributes)
 
     def get_identity(self):
-        """ The assertion can contain zero or one attributeStatements
+        """ The assertion can contain zero or more attributeStatements
 
         """
         ava = {}
@@ -663,9 +663,11 @@ class AuthnResponse(StatusResponse):
                             ava.update(self.read_attribute_statement(
                                 tmp_assertion.attribute_statement[0]))
             if _assertion.attribute_statement:
-                assert len(_assertion.attribute_statement) == 1
-                _attr_statem = _assertion.attribute_statement[0]
-                ava.update(self.read_attribute_statement(_attr_statem))
+                logger.debug("Assertion contains %s attribute statement(s)",
+                             (len(self.assertion.attribute_statement)))
+                for _attr_statem in _assertion.attribute_statement:
+                    logger.debug("Attribute Statement: %s" % (_attr_statem,))
+                    ava.update(self.read_attribute_statement(_attr_statem))
             if not ava:
                 logger.debug("Assertion contains no attribute statements")
         return ava
@@ -911,7 +913,8 @@ class AuthnResponse(StatusResponse):
         else:  # This is a saml2int limitation
             try:
                 assert len(self.response.assertion) == 1 or \
-                       len(self.response.encrypted_assertion) == 1
+                       len(self.response.encrypted_assertion) == 1 or \
+                       self.assertion is not None
             except AssertionError:
                 raise Exception("No assertion part")
 

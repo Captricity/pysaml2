@@ -9,6 +9,7 @@ from saml2.extension import mdui
 from saml2.extension import idpdisc
 from saml2.extension import shibmd
 from saml2.extension import mdattr
+from saml2.extension import sp_type
 from saml2.saml import NAME_FORMAT_URI
 from saml2.saml import AttributeValue
 from saml2.saml import Attribute
@@ -700,15 +701,14 @@ def entity_descriptor(confd):
     enc_cert = None
     if confd.cert_file is not None:
         mycert = []
-        mycert.append("".join(open(confd.cert_file).readlines()[1:-1]))
+        mycert.append("".join(read_cert(confd.cert_file)))
         if confd.additional_cert_files is not None:
             for _cert_file in confd.additional_cert_files:
-                mycert.append("".join(open(_cert_file).readlines()[1:-1]))
+                mycert.append("".join(read_cert(_cert_file)))
     if confd.encryption_keypairs is not None:
         enc_cert = []
         for _encryption in confd.encryption_keypairs:
-            enc_cert.append(
-                "".join(open(_encryption["cert_file"]).readlines()[1:-1]))
+            enc_cert.append("".join(read_cert(_encryption["cert_file"])))
 
     entd = md.EntityDescriptor()
     entd.entity_id = confd.entityid
@@ -722,7 +722,8 @@ def entity_descriptor(confd):
         entd.contact_person = do_contact_person_info(confd.contact_person)
 
     if confd.entity_category:
-        entd.extensions = md.Extensions()
+        if not entd.extensions:
+            entd.extensions = md.Extensions()
         ava = [AttributeValue(text=c) for c in confd.entity_category]
         attr = Attribute(attribute_value=ava,
                          name="http://macedir.org/entity-category")
@@ -732,6 +733,14 @@ def entity_descriptor(confd):
     for item in algorithm_support_in_metadata(confd.xmlsec_binary):
         if not entd.extensions:
             entd.extensions = md.Extensions()
+        entd.extensions.add_extension_element(item)
+
+    conf_sp_type = confd.getattr('sp_type', 'sp')
+    conf_sp_type_in_md = confd.getattr('sp_type_in_metadata', 'sp')
+    if conf_sp_type and conf_sp_type_in_md is True:
+        if not entd.extensions:
+            entd.extensions = md.Extensions()
+        item = sp_type.SPType(text=conf_sp_type)
         entd.extensions.add_extension_element(item)
 
     serves = confd.serves
@@ -811,3 +820,9 @@ def sign_entity_descriptor(edesc, ident, secc, sign_alg=None, digest_alg=None):
     xmldoc = secc.sign_statement("%s" % edesc, class_name(edesc))
     edesc = md.entity_descriptor_from_string(xmldoc)
     return edesc, xmldoc
+
+
+def read_cert(path):
+    with open(path) as fp:
+        lines = fp.readlines()
+    return lines[1:-1]

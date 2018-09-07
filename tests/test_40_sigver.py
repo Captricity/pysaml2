@@ -18,8 +18,7 @@ from saml2.saml import EncryptedAssertion
 from saml2.samlp import response_from_string
 from saml2.s_utils import factory, do_attribute_statement
 
-#from pyasn1.codec.der import decoder
-
+import pytest
 from py.test import raises
 
 from pathutils import full_path
@@ -27,6 +26,8 @@ from pathutils import full_path
 SIGNED = full_path("saml_signed.xml")
 UNSIGNED = full_path("saml_unsigned.xml")
 SIMPLE_SAML_PHP_RESPONSE = full_path("simplesamlphp_authnresponse.xml")
+OKTA_RESPONSE = full_path("okta_response.xml")
+OKTA_ASSERTION = full_path("okta_assertion")
 
 PUB_KEY = full_path("test.pem")
 PRIV_KEY = full_path("test.key")
@@ -69,10 +70,15 @@ Yj4cAafWaYfjBU2zi1ElwStIaJ5nyp/s/8B8SAPK2T79McMyccP3wSW13LHkmM1j
 wKe3ACFXBvqGQN0IbcH49hu0FKhYFM/GPDJcIHFBsiyMBXChpye9vBaTNEBCtU3K
 jjyG0hRT2mAQ9h+bkPmOvlEo/aH0xR68Z9hw4PF13w=="""
 
+try:
+    from pyasn1.codec.der import decoder
+except ImportError:
+    decoder = None
 
 
 def test_cert_from_instance_1():
-    xml_response = open(SIGNED).read()
+    with open(SIGNED) as fp:
+        xml_response = fp.read()
     response = samlp.response_from_string(xml_response)
     assertion = response.assertion[0]
     certs = sigver.cert_from_instance(assertion)
@@ -81,16 +87,19 @@ def test_cert_from_instance_1():
     assert certs[0] == CERT1
 
 
-# def test_cert_from_instance_ssp():
-#     xml_response = open(SIMPLE_SAML_PHP_RESPONSE).read()
-#     response = samlp.response_from_string(xml_response)
-#     assertion = response.assertion[0]
-#     certs = sigver.cert_from_instance(assertion)
-#     assert len(certs) == 1
-#     assert certs[0] == CERT_SSP
-#     der = base64.b64decode(certs[0])
-#     print(str(decoder.decode(der)).replace('.', "\n."))
-#     assert decoder.decode(der)
+@pytest.mark.skipif(not decoder,
+                    reason="pyasn1 is not installed")
+def test_cert_from_instance_ssp():
+    with open(SIMPLE_SAML_PHP_RESPONSE) as fp:
+        xml_response = fp.read()
+    response = samlp.response_from_string(xml_response)
+    assertion = response.assertion[0]
+    certs = sigver.cert_from_instance(assertion)
+    assert len(certs) == 1
+    assert certs[0] == CERT_SSP
+    der = base64.b64decode(certs[0])
+    print(str(decoder.decode(der)).replace('.', "\n."))
+    assert decoder.decode(der)
 
 
 class FakeConfig():
@@ -105,7 +114,6 @@ class FakeConfig():
     key_file = PRIV_KEY
     encryption_keypairs = [{"key_file": ENC_PRIV_KEY, "cert_file": ENC_PUB_KEY}]
     enc_key_files = [ENC_PRIV_KEY]
-    debug = False
     cert_handler_extra_class = None
     generate_cert_func = None
     generate_cert_info = False
@@ -130,7 +138,7 @@ class TestSecurity():
         # (TestSecurityMetadata below) excersise the SPConfig() mechanism.
         #
         conf = FakeConfig()
-        self.sec = sigver.security_context(FakeConfig())
+        self.sec = sigver.security_context(conf)
 
         self._assertion = factory(
             saml.Assertion,
@@ -145,13 +153,15 @@ class TestSecurity():
         )
 
     def test_verify_1(self):
-        xml_response = open(SIGNED).read()
+        with open(SIGNED) as fp:
+            xml_response = fp.read()
         response = self.sec.correctly_signed_response(xml_response)
         assert response
 
     def test_non_verify_1(self):
         """ unsigned is OK """
-        xml_response = open(UNSIGNED).read()
+        with open(UNSIGNED) as fp:
+            xml_response = fp.read()
         response = self.sec.correctly_signed_response(xml_response)
         assert response
 
@@ -465,7 +475,6 @@ def test_xbox():
         str(encrypted_assertion), conf.cert_file, pre, "des-192",
         '/*[local-name()="EncryptedAssertion"]/*[local-name()="Assertion"]')
 
-
     decr_text = sec.decrypt(enctext)
     _seass = saml.encrypted_assertion_from_string(decr_text)
     assertions = []
@@ -484,6 +493,30 @@ def test_xbox():
             assertions.append(ass)
 
     print(assertions)
+
+
+def test_okta():
+    conf = config.Config()
+    conf.load_file("server_conf")
+    conf.id_attr_name = 'Id'
+    md = MetadataStore([saml, samlp], None, conf)
+    md.load("local", full_path("idp_example.xml"))
+
+    conf.metadata = md
+    conf.only_use_keys_in_metadata = False
+    sec = sigver.security_context(conf)
+    with open(OKTA_RESPONSE) as f:
+        enctext = f.read()
+    decr_text = sec.decrypt(enctext)
+    _seass = saml.encrypted_assertion_from_string(decr_text)
+    assers = extension_elements_to_elements(_seass.extension_elements,
+                                            [saml, samlp])
+
+    with open(OKTA_ASSERTION) as f:
+        okta_assertion = f.read()
+    expected_assert = assertion_from_string(okta_assertion)
+    assert len(assers) == 1
+    assert assers[0] == expected_assert
 
 
 def test_xmlsec_err():
